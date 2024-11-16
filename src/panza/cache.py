@@ -1,9 +1,9 @@
+from abc import ABC, abstractmethod
 import sqlite3
-import functools
 import pickle
 import hashlib
 import asyncio
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple, Any
 import os
 
 BUST_CACHE = os.getenv("BUST_CACHE", "")
@@ -21,15 +21,44 @@ if CACHE_ONLY:
     print("CACHE_ONLY is set to True. Cache will be used exclusively.")
 
 
-class SQLiteCache:
-    def __init__(self, db_path):
+class CacheBackend(ABC):
+    @abstractmethod
+    async def setup(self) -> None:
+        pass
+
+    @abstractmethod
+    async def get(self, fn_id: str, arg_hash: str) -> Tuple[bool, Any]:
+        """Returns (cache_hit, result)"""
+        pass
+
+    @abstractmethod
+    async def set(self, fn_id: str, arg_hash: str, result: Any) -> None:
+        pass
+
+    @abstractmethod
+    async def delete(self, fn_id: str, arg_hash: str) -> None:
+        """Deletes a cache entry"""
+        pass
+
+    @abstractmethod
+    async def delete_all(self) -> None:
+        """Deletes all cache entries"""
+        pass
+
+    @abstractmethod
+    async def delete_by_fn_id(self, fn_id: str) -> None:
+        """Deletes all cache entries for a specific function ID"""
+        pass
+
+
+class SQLiteBackend(CacheBackend):
+    def __init__(self, db_path: str):
         self.db_path = db_path
-        self._setup()
 
     def _get_connection(self):
         return sqlite3.connect(self.db_path)
 
-    def _setup(self):
+    async def setup(self):
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -47,7 +76,7 @@ class SQLiteCache:
             )
             conn.commit()
 
-    def _get_from_cache(self, fn_id, arg_hash):
+    async def get(self, fn_id: str, arg_hash: str) -> Tuple[bool, Any]:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -70,16 +99,16 @@ class SQLiteCache:
             result_data = b"".join(row[0] for row in rows)
             return True, pickle.loads(result_data)
 
-    def _set_cache(self, fn_id, arg_hash, result):
+    async def set(self, fn_id: str, arg_hash: str, result: Any) -> None:
         pickled_data = pickle.dumps(result)
         chunk_size = 1024 * 1024  # 1MB chunks
         is_chunked = len(pickled_data) > chunk_size
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            # Clear existing entries
             cursor.execute(
-                "DELETE FROM cache WHERE fn_id = ? AND arg_hash = ?", (fn_id, arg_hash)
+                "DELETE FROM cache WHERE fn_id = ? AND arg_hash = ?",
+                (fn_id, arg_hash),
             )
 
             if not is_chunked:
@@ -91,7 +120,6 @@ class SQLiteCache:
                     (fn_id, arg_hash, pickled_data),
                 )
             else:
-                # Split into chunks
                 chunks = [
                     pickled_data[i : i + chunk_size]
                     for i in range(0, len(pickled_data), chunk_size)
@@ -107,137 +135,172 @@ class SQLiteCache:
 
             conn.commit()
 
+    async def delete(self, fn_id: str, arg_hash: str) -> None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM cache WHERE fn_id = ? AND arg_hash = ?",
+                (fn_id, arg_hash),
+            )
+            conn.commit()
+
+    async def delete_all(self) -> None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM cache")
+            conn.commit()
+
+    async def delete_by_fn_id(self, fn_id: str) -> None:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM cache WHERE fn_id = ?", (fn_id,))
+            conn.commit()
+
+
+class Cache:
+    def __init__(self, backend: CacheBackend):
+        self.backend = backend
+        self._setup_done = False
+
+    async def ensure_setup(self):
+        if not self._setup_done:
+            await self.backend.setup()
+            self._setup_done = True
+
     def cache(
         self,
         id: Optional[str] = None,
         hash_func: Optional[Callable[..., str]] = None,
         debug: bool = False,
-        bust_cache: bool = False,
     ):
         def decorator(func):
-            is_coroutine = asyncio.iscoroutinefunction(func)
+            if not asyncio.iscoroutinefunction(func):
+                raise ValueError(
+                    "Cache decorator can only be used with async functions"
+                )
 
-            if is_coroutine:
+            async def async_wrapper(*args, **kwargs):
+                await self.ensure_setup()
+                fn_id = id if id else func.__name__
 
-                @functools.wraps(func)
-                async def wrapper(*args, runtime_bust_cache=False, **kwargs):
-                    if id:
-                        fn_id = id
+                try:
+                    if hash_func:
+                        arg_hash = hashlib.sha256(
+                            hash_func(*args, **kwargs).encode()
+                        ).hexdigest()
                     else:
-                        fn_id = func.__name__
-
-                    try:
-                        if hash_func:
-                            arg_hash = hashlib.sha256(
-                                hash_func(*args, **kwargs).encode()
-                            ).hexdigest()
-                        else:
-                            # if debug:
-                            #     print((args, kwargs))
-                            arg_hash = hashlib.sha256(
-                                pickle.dumps((args, kwargs))
-                            ).hexdigest()
-                    except Exception as e:
-                        print(
-                            f"Error computing arg_hash for fn_id={fn_id} with inputs args={args}, kwargs={kwargs}"
-                        )
-                        raise e  # Re-throw the exception after logging
-
-                    if debug:
-                        print(f"Debug: fn_id={fn_id}, arg_hash={arg_hash}")
-
-                    should_bust_cache = (
-                        bust_cache
-                        or runtime_bust_cache
-                        or fn_id in bust_cache_ids
-                        or "all" in bust_cache_ids
+                        arg_hash = hashlib.sha256(
+                            pickle.dumps((args, kwargs))
+                        ).hexdigest()
+                except Exception as e:
+                    print(
+                        f"Error computing arg_hash for fn_id={fn_id} with inputs args={args}, kwargs={kwargs}"
                     )
-                    if debug:
-                        print(f"should_bust_cache={should_bust_cache}")
+                    raise e
 
-                    if not should_bust_cache:
-                        cache_hit, cached_result = self._get_from_cache(fn_id, arg_hash)
-                        if debug:
-                            print(f"Debug: cache_hit={cache_hit}")
-                        if cache_hit:
-                            return cached_result
+                if debug:
+                    print(f"Debug: fn_id={fn_id}, arg_hash={arg_hash}")
 
-                    if CACHE_ONLY:
-                        raise Exception(
-                            f"Cache miss for fn_id={fn_id} with arg_hash={arg_hash}. CACHE_ONLY is set to True."
-                        )
+                should_bust_cache = fn_id in bust_cache_ids or "all" in bust_cache_ids
+                if debug:
+                    print(f"should_bust_cache={should_bust_cache}")
 
-                    if PRINT_CACHE_MISSES:
-                        print(
-                            f"Cache miss for fn_id={fn_id} with arg_hash={arg_hash}. Executing function."
-                        )
-                        # print(f"Args: {args}")
-                        # print(f"Kwargs: {kwargs}")
+                if not should_bust_cache:
+                    cache_hit, cached_result = await self.backend.get(fn_id, arg_hash)
+                    if cache_hit:
+                        return cached_result
 
-                    result = await func(*args, **kwargs)
-                    self._set_cache(fn_id, arg_hash, result)
-                    return result
-            else:
+                if CACHE_ONLY:
+                    raise Exception(
+                        f"Cache miss for fn_id={fn_id} with arg_hash={arg_hash}. CACHE_ONLY is set to True."
+                    )
 
-                @functools.wraps(func)
-                def wrapper(*args, runtime_bust_cache=False, **kwargs):
-                    if id:
-                        fn_id = id
+                if PRINT_CACHE_MISSES:
+                    print(
+                        f"Cache miss for fn_id={fn_id} with arg_hash={arg_hash}. Executing function."
+                    )
+
+                result = await func(*args, **kwargs)
+                await self.backend.set(fn_id, arg_hash, result)
+                return result
+
+            async def bust_cache(*args, **kwargs):
+                await self.ensure_setup()
+                fn_id = id if id else func.__name__
+
+                if not args and not kwargs:
+                    await self.backend.delete_by_fn_id(fn_id)
+                    return
+
+                try:
+                    if hash_func:
+                        arg_hash = hashlib.sha256(
+                            hash_func(*args, **kwargs).encode()
+                        ).hexdigest()
                     else:
-                        fn_id = func.__name__
-
-                    try:
-                        if hash_func:
-                            arg_hash = hashlib.sha256(
-                                hash_func(*args, **kwargs).encode()
-                            ).hexdigest()
-                        else:
-                            # if debug:
-                            #     print((args, kwargs))
-                            arg_hash = hashlib.sha256(
-                                pickle.dumps((args, kwargs))
-                            ).hexdigest()
-                    except Exception as e:
-                        print(
-                            f"Error computing arg_hash for fn_id={fn_id} with inputs args={args}, kwargs={kwargs}"
-                        )
-                        raise e  # Re-throw the exception after logging
-
-                    if debug:
-                        print(f"Debug: fn_id={fn_id}, arg_hash={arg_hash}")
-
-                    should_bust_cache = (
-                        bust_cache
-                        or runtime_bust_cache
-                        or fn_id in bust_cache_ids
-                        or "all" in bust_cache_ids
+                        arg_hash = hashlib.sha256(
+                            pickle.dumps((args, kwargs))
+                        ).hexdigest()
+                    await self.backend.delete(fn_id, arg_hash)
+                except Exception as e:
+                    print(
+                        f"Error computing arg_hash for fn_id={fn_id} with inputs args={args}, kwargs={kwargs}"
                     )
-                    if debug:
-                        print(f"should_bust_cache={should_bust_cache}")
+                    raise e
 
-                    if not should_bust_cache:
-                        cache_hit, cached_result = self._get_from_cache(fn_id, arg_hash)
-                        if debug:
-                            print(f"Debug: cache_hit={cache_hit}")
-                        if cache_hit:
-                            return cached_result
+            async def read_cache(*args, **kwargs):
+                await self.ensure_setup()
+                fn_id = id if id else func.__name__
 
-                    if CACHE_ONLY:
-                        raise Exception(
-                            f"Cache miss for fn_id={fn_id} with arg_hash={arg_hash}. CACHE_ONLY is set to True."
-                        )
+                try:
+                    if hash_func:
+                        arg_hash = hashlib.sha256(
+                            hash_func(*args, **kwargs).encode()
+                        ).hexdigest()
+                    else:
+                        arg_hash = hashlib.sha256(
+                            pickle.dumps((args, kwargs))
+                        ).hexdigest()
+                except Exception as e:
+                    print(
+                        f"Error computing arg_hash for fn_id={fn_id} with inputs args={args}, kwargs={kwargs}"
+                    )
+                    raise e
 
-                    if PRINT_CACHE_MISSES:
-                        print(
-                            f"Cache miss for fn_id={fn_id} with arg_hash={arg_hash}. Executing function."
-                        )
-                        # print(f"Args: {args}")
-                        # print(f"Kwargs: {kwargs}")
+                return await self.backend.get(fn_id, arg_hash)
 
-                    result = func(*args, **kwargs)
-                    self._set_cache(fn_id, arg_hash, result)
-                    return result
-
-            return wrapper
+            async_wrapper.bust_cache = bust_cache
+            async_wrapper.read_cache = read_cache
+            return async_wrapper
 
         return decorator
+
+    async def bust_all(self) -> None:
+        """Busts the entire cache"""
+        await self.ensure_setup()
+        await self.backend.delete_all()
+
+    async def set(self, key: str, value: Any) -> None:
+        """Directly set a value in the cache using a string key"""
+        await self.ensure_setup()
+        fn_id = "__direct"
+        arg_hash = hashlib.sha256(key.encode()).hexdigest()
+        await self.backend.set(fn_id, arg_hash, value)
+
+    async def get(self, key: str) -> Any:
+        """
+        Directly get a value from the cache using a string key
+        Raises KeyError if the key hasn't been set
+        """
+        await self.ensure_setup()
+        fn_id = "__direct"
+        arg_hash = hashlib.sha256(key.encode()).hexdigest()
+        cache_hit, result = await self.backend.get(fn_id, arg_hash)
+        if not cache_hit:
+            raise KeyError(f"No cache entry found for key: {key}")
+        return result
+
+
+class SQLiteCache(Cache):
+    def __init__(self, db_path: str):
+        super().__init__(SQLiteBackend(db_path))
