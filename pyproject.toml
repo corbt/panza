@@ -4,10 +4,16 @@ version = "0.1.0"
 description = "Experimental sqlite caching and concurrency limiting"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "aioboto3>=13.4.0",
+]
 
 [tool.uv]
 dev-dependencies = [
+    "flask-cors>=5.0.0",
+    "flask>=3.1.0",
+    "moto[s3]>=5.0.28",
     "pytest-asyncio>=0.24.0",
     "pytest>=8.3.3",
+    "python-dotenv>=1.0.1",
 ]

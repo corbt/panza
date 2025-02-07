@@ -1,15 +1,48 @@
 import asyncio
 import pytest
-from .cache import SQLiteCache
+from .cache import SQLiteCache, S3Cache
+import os
+import time
 
 
-# Test fixtures
-@pytest.fixture
-def cache():
-    cache = SQLiteCache("./test_cache.db")
-    yield cache
-    # Cleanup
-    asyncio.run(cache.bust_all())
+# Create a session-scoped fixture for the moto server.
+@pytest.fixture(scope="session")
+def moto_server():
+    from moto.server import ThreadedMotoServer
+
+    host = "127.0.0.1"
+    port = 5543
+    server = ThreadedMotoServer(ip_address=host, port=port)
+    server.start()
+    yield server
+    server.stop()
+
+
+# Parameterized fixture to yield both cache backends
+@pytest.fixture(params=["sqlite", "s3"])
+def cache(request, tmp_path, moto_server):
+    if request.param == "sqlite":
+        db_path = str(tmp_path / "test_cache.db")
+        c = SQLiteCache(db_path)
+        yield c
+        asyncio.run(c.bust_all())
+        if os.path.exists(db_path):
+            os.remove(db_path)
+    elif request.param == "s3":
+        host = "127.0.0.1"
+        port = 5543
+        endpoint_url = f"http://{host}:{port}"
+        os.environ["AWS_ENDPOINT_URL"] = endpoint_url
+        # Initialize S3Cache with the endpoint_url already provided by our moto_server
+        c = S3Cache(
+            "test-bucket/testprefix",
+            auto_create_bucket=True,
+            region_name="us-east-1",
+            endpoint_url=endpoint_url,
+        )
+        yield c
+        asyncio.run(c.bust_all())
+        del os.environ["AWS_ENDPOINT_URL"]
 
 
 # Test functions to be cached
@@ -25,7 +58,7 @@ async def async_multiply(a: int, b: int) -> int:
 async def test_async_cache_hit(cache):
     cached_add = cache.cache()(async_add)
 
-    # First call - should miss cache
+    # First call - should be computed and then cached
     result1 = await cached_add(2, 3)
     assert result1 == 5
 
@@ -34,7 +67,7 @@ async def test_async_cache_hit(cache):
     assert cache_hit
     assert cached_result == 5
 
-    # Verify cached result is returned quickly
+    # Verify cached result is returned on subsequent calls
     result2 = await cached_add(2, 3)
     assert result2 == 5
 
@@ -81,13 +114,13 @@ async def test_bust_specific_args(cache):
     assert result1 == 5
     assert result2 == 9
 
-    # Bust specific args and verify only that entry is removed
+    # Bust cache for the (2, 3) call only
     await cached_add.bust_cache(2, 3)
 
     cache_hit1, _ = await cached_add.read_cache(2, 3)
     cache_hit2, cached_result2 = await cached_add.read_cache(4, 5)
-    assert not cache_hit1  # Should be busted
-    assert cache_hit2  # Should still exist
+    assert not cache_hit1  # (2,3) entry should not exist now
+    assert cache_hit2
     assert cached_result2 == 9
 
 
@@ -130,7 +163,7 @@ async def test_bust_entire_cache(cache):
 
 @pytest.mark.asyncio
 async def test_direct_cache_operations(cache):
-    # Test setting and getting a value
+    # Test directly setting and getting a value
     await cache.set("test_key", "test_value")
     result = await cache.get("test_key")
     assert result == "test_value"
