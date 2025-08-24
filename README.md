@@ -123,6 +123,26 @@ async def fetch_and_process(item_id):
 
 ## Advanced Usage
 
+### Reading from Cache Without Execution
+
+Use `.read_cache()` to check if a result is cached without executing the function:
+
+```python
+@cache.cache(id="expensive_function")
+async def expensive_function(param):
+    await asyncio.sleep(5)  # Simulate expensive operation
+    return f"Computed result for {param}"
+
+# Check cache without executing
+cache_hit, result = await expensive_function.read_cache("test")
+if cache_hit:
+    print(f"Found in cache: {result}")
+else:
+    print("Not in cache")
+    # Optionally execute now
+    result = await expensive_function("test")
+```
+
 ### Direct Cache Access
 
 ```python

@@ -3,6 +3,7 @@ import pytest
 from .cache import SQLiteCache, S3Cache
 import os
 import time
+from dataclasses import dataclass
 
 
 # Create a session-scoped fixture for the moto server.
@@ -181,3 +182,45 @@ async def test_direct_cache_operations(cache):
     await cache.bust_all()
     with pytest.raises(KeyError):
         await cache.get("test_key")
+
+
+@dataclass
+class TestData:
+    name: str
+    value: int
+
+
+@pytest.mark.asyncio
+async def test_dataclass_cache_behavior(cache):
+    """Test that dataclasses with identical contents hit the cache correctly"""
+    
+    @cache.cache()
+    async def process_data(data: TestData) -> str:
+        return f"Processed: {data.name} = {data.value}"
+    
+    # Create two identical dataclass instances
+    data1 = TestData("test", 42)
+    data2 = TestData("test", 42)
+    
+    # Verify they are equal but different objects
+    assert data1 == data2
+    assert data1 is not data2
+    
+    # First call - should be computed and cached
+    result1 = await process_data(data1)
+    assert result1 == "Processed: test = 42"
+    
+    # Verify cache hit with original instance
+    cache_hit1, cached_result1 = await process_data.read_cache(data1)
+    assert cache_hit1
+    assert cached_result1 == "Processed: test = 42"
+    
+    # Verify cache hit with identical but different instance
+    cache_hit2, cached_result2 = await process_data.read_cache(data2)
+    assert cache_hit2
+    assert cached_result2 == "Processed: test = 42"
+    
+    # Test with different dataclass instance should miss cache
+    data3 = TestData("different", 99)
+    cache_hit3, _ = await process_data.read_cache(data3)
+    assert not cache_hit3
