@@ -1,22 +1,9 @@
 import asyncio
 import pytest
-from .cache import SQLiteCache, S3Cache
+from .cache import SQLiteCache, S3Cache, normalize_for_hashing
 import os
 import time
 from dataclasses import dataclass
-
-
-# Create a session-scoped fixture for the moto server.
-@pytest.fixture(scope="session")
-def moto_server():
-    from moto.server import ThreadedMotoServer
-
-    host = "127.0.0.1"
-    port = 5543
-    server = ThreadedMotoServer(ip_address=host, port=port)
-    server.start()
-    yield server
-    server.stop()
 
 
 # Parameterized fixture to yield both cache backends
@@ -185,7 +172,7 @@ async def test_direct_cache_operations(cache):
 
 
 @dataclass
-class TestData:
+class DataForTest:
     name: str
     value: int
 
@@ -193,34 +180,79 @@ class TestData:
 @pytest.mark.asyncio
 async def test_dataclass_cache_behavior(cache):
     """Test that dataclasses with identical contents hit the cache correctly"""
-    
+
     @cache.cache()
-    async def process_data(data: TestData) -> str:
+    async def process_data(data: DataForTest) -> str:
         return f"Processed: {data.name} = {data.value}"
-    
+
     # Create two identical dataclass instances
-    data1 = TestData("test", 42)
-    data2 = TestData("test", 42)
-    
+    data1 = DataForTest("test", 42)
+    data2 = DataForTest("test", 42)
+
     # Verify they are equal but different objects
     assert data1 == data2
     assert data1 is not data2
-    
+
     # First call - should be computed and cached
     result1 = await process_data(data1)
     assert result1 == "Processed: test = 42"
-    
+
     # Verify cache hit with original instance
     cache_hit1, cached_result1 = await process_data.read_cache(data1)
     assert cache_hit1
     assert cached_result1 == "Processed: test = 42"
-    
+
     # Verify cache hit with identical but different instance
     cache_hit2, cached_result2 = await process_data.read_cache(data2)
     assert cache_hit2
     assert cached_result2 == "Processed: test = 42"
-    
+
     # Test with different dataclass instance should miss cache
-    data3 = TestData("different", 99)
+    data3 = DataForTest("different", 99)
     cache_hit3, _ = await process_data.read_cache(data3)
     assert not cache_hit3
+
+
+def test_normalize_for_hashing_sets():
+    # Ensure sets are converted to sorted lists
+    s = {"b", "a", "c"}
+    normalized = normalize_for_hashing(s)
+    assert isinstance(normalized, list)
+    assert normalized == ["a", "b", "c"]
+
+
+def test_normalize_for_hashing_dicts():
+    # Ensure dict keys are sorted
+    d = {"b": 2, "a": 1}
+    normalized = normalize_for_hashing(d)
+    assert list(normalized.keys()) == ["a", "b"]
+    assert normalized["a"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pydantic_normalization_behavior(cache):
+    import pydantic
+    from typing import Set
+
+    class MyModel(pydantic.BaseModel):
+        id: int
+        tags: Set[str]
+
+    m = MyModel(id=1, tags={"c", "a", "b"})
+
+    # Access normalize_for_hashing to verify it handles the model
+    normalized = normalize_for_hashing(m)
+
+    # Should be a dict with sorted set in tags
+    assert isinstance(normalized, dict)
+    assert normalized["id"] == 1
+    assert normalized["tags"] == ["a", "b", "c"]
+
+    # Now test actual caching
+    @cache.cache()
+    async def process_model(model: MyModel):
+        return "ok"
+
+    await process_model(m)
+    hit, _ = await process_model.read_cache(m)
+    assert hit

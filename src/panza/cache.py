@@ -20,6 +20,38 @@ if CACHE_ONLY:
     print("CACHE_ONLY is set to True. Cache will be used exclusively.")
 
 
+def normalize_for_hashing(obj):
+    """
+    Recursively normalize objects for deterministic hashing.
+    - Pydantic models -> dicts (keeping sets as sets for sorting)
+    - Sets -> sorted lists
+    - Dicts -> dicts with sorted keys
+    """
+    # Check for Pydantic models (v1 and v2)
+    # Use mode='python' to keep sets as sets so we can sort them deterministically below
+    if hasattr(obj, "model_dump"):
+        return normalize_for_hashing(obj.model_dump(mode="python"))
+    elif hasattr(obj, "dict") and hasattr(obj, "json"):
+        return normalize_for_hashing(obj.dict())
+
+    if isinstance(obj, (list, tuple)):
+        return [normalize_for_hashing(x) for x in obj]
+
+    if isinstance(obj, dict):
+        # Sort keys to ensure deterministic order
+        return {k: normalize_for_hashing(v) for k, v in sorted(obj.items())}
+
+    if isinstance(obj, set):
+        # Convert sets to sorted lists
+        try:
+            return sorted([normalize_for_hashing(x) for x in obj])
+        except TypeError:
+            # Fallback for non-sortable elements (rare in cache keys)
+            return sorted([normalize_for_hashing(x) for x in obj], key=str)
+
+    return obj
+
+
 class CacheBackend(ABC):
     @abstractmethod
     async def setup(self) -> None:
@@ -83,7 +115,7 @@ class Cache:
                         ).hexdigest()
                     else:
                         arg_hash = hashlib.sha256(
-                            pickle.dumps((args, kwargs))
+                            pickle.dumps(normalize_for_hashing((args, kwargs)))
                         ).hexdigest()
                 except Exception as e:
                     print(
@@ -132,7 +164,7 @@ class Cache:
                         ).hexdigest()
                     else:
                         arg_hash = hashlib.sha256(
-                            pickle.dumps((args, kwargs))
+                            pickle.dumps(normalize_for_hashing((args, kwargs)))
                         ).hexdigest()
                     await self.backend.delete(fn_id, arg_hash)
                 except Exception as e:
@@ -152,7 +184,7 @@ class Cache:
                         ).hexdigest()
                     else:
                         arg_hash = hashlib.sha256(
-                            pickle.dumps((args, kwargs))
+                            pickle.dumps(normalize_for_hashing((args, kwargs)))
                         ).hexdigest()
                 except Exception as e:
                     print(

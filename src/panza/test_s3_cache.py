@@ -12,26 +12,26 @@ from panza.cache import S3Cache
 
 # Use pytest_asyncio.fixture instead of pytest.fixture for asynchronous fixtures.
 @pytest_asyncio.fixture
-async def s3_cache():
-    aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
-    aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-    if not aws_access_key or not aws_secret_key:
-        pytest.skip("AWS credentials not set in environment; skipping S3 tests.")
+async def s3_cache(moto_server):
+    # Setup fake credentials to avoid real AWS usage
+    os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+    os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+    os.environ["AWS_SECURITY_TOKEN"] = "testing"
+    os.environ["AWS_SESSION_TOKEN"] = "testing"
+    os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
 
-    bucket = os.getenv("AWS_S3_BUCKET")
-    prefix = "prefix"
-    region = os.getenv("AWS_REGION", "us-west-2")
-    # Optionally provide a custom S3 endpoint URL (e.g. if you're using a non-AWS S3 provider)
-    endpoint = os.getenv("AWS_S3_ENDPOINT_URL")  # Can be None if not provided
+    host = "127.0.0.1"
+    port = 5543
+    endpoint_url = f"http://{host}:{port}"
 
-    # Create the S3Cache instance.
+    # Create the S3Cache instance using the moto server
     cache_instance = S3Cache(
-        f"{bucket}/{prefix}",
+        "test-bucket/prefix",
         auto_create_bucket=True,
-        aws_access_key_id=aws_access_key,
-        aws_secret_access_key=aws_secret_key,
-        region_name=region,
-        endpoint_url=endpoint,
+        aws_access_key_id="testing",
+        aws_secret_access_key="testing",
+        region_name="us-east-1",
+        endpoint_url=endpoint_url,
     )
     # Ensure the backend is set up.
     await cache_instance.ensure_setup()
