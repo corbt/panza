@@ -1,10 +1,13 @@
 [project]
 name = "panza"
-version = "0.2.0"
+version = "0.2.1"
 description = "Experimental sqlite caching and concurrency limiting"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
+dependencies = []
+
+[project.optional-dependencies]
+s3 = [
     "aioboto3>=13.4.0",
 ]
 
