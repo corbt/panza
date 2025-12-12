@@ -227,4 +227,7 @@ class Cache:
 
 
 from .sqlite_backend import SQLiteCache
-from .s3_backend import S3Cache
+try:
+    from .s3_backend import S3Cache
+except ImportError:
+    pass
