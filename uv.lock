@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10"
 
 [[package]]
@@ -730,9 +730,11 @@ wheels = [
 
 [[package]]
 name = "panza"
-version = "0.1.0"
+version = "0.2.2"
 source = { virtual = "." }
-dependencies = [
+
+[package.optional-dependencies]
+s3 = [
     { name = "aioboto3" },
 ]
 
@@ -748,7 +750,8 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "aioboto3", specifier = ">=13.4.0" }]
+requires-dist = [{ name = "aioboto3", marker = "extra == 's3'", specifier = ">=13.4.0" }]
+provides-extras = ["s3"]
 
 [package.metadata.requires-dev]
 dev = [
